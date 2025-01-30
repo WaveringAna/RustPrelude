@@ -14,7 +14,8 @@ struct Args {
     path: Option<PathBuf>,
 
     /// Specify a filename to save the prompt
-    #[arg(short = 'F')]                                                                            output_file: Option<PathBuf>,
+    #[arg(short = 'F')]
+    output_file: Option<PathBuf>,
 
     /// Specify pattern(s) to match filenames
     #[arg(short = 'M')]
@@ -63,6 +64,7 @@ fn main() -> Result<()> {
         println!("Found .preludeignore - applying ignore patterns");
         walker.add_ignore(Path::new(".preludeignore"));
     }
+
     // Configure git integration
     if args.git_only {
         println!("Git-only mode enabled - only including tracked files");
@@ -70,6 +72,7 @@ fn main() -> Result<()> {
         walker.git_global(true);
         walker.git_exclude(true);
     }
+
     // Set case sensitivity
     walker.ignore_case_insensitive(!args.case_sensitive);
     if args.case_sensitive {
@@ -80,29 +83,63 @@ fn main() -> Result<()> {
 
     // Collect all valid files
     let mut files: Vec<PathBuf> = Vec::new();
-    for entry in walker.build() {
-        match entry {
-            Ok(entry) => {
-                if entry.file_type().map_or(false, |ft| ft.is_file()) {                                            if let Ok(path) = entry.path().strip_prefix(&root_path) {
-                        println!("Reading: {}", path.display());
-                        files.push(path.to_path_buf());                                                            }
-                }
+    let mut ignored_files: Vec<PathBuf> = Vec::new();
+
+    // First, get all entries without ignoring any
+    let all_entries = WalkBuilder::new(&root_path)
+        .git_ignore(args.git_only)
+        .git_global(args.git_only)
+        .git_exclude(args.git_only)
+        .ignore_case_insensitive(!args.case_sensitive)
+        .build()
+        .map(|r| r.map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Then get entries with ignoring enabled
+    let filtered_entries = walker.build()
+        .map(|r| r.map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Find ignored files by comparing the two sets of entries
+    'outer: for entry in all_entries {
+        let path = entry.path().strip_prefix(&root_path).unwrap().to_path_buf();
+        for filtered_entry in &filtered_entries {
+            let filtered_path = filtered_entry.path().strip_prefix(&root_path).unwrap().to_path_buf();
+            if path == filtered_path {
+                continue 'outer;
             }
-            Err(err) => eprintln!("Error accessing path: {}", err),
+        }
+        ignored_files.push(path);
+    }
+
+    // Now collect the filtered files
+    for entry in filtered_entries {
+        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+            if let Ok(path) = entry.path().strip_prefix(&root_path) {
+                println!("Reading: {}", path.display());
+                files.push(path.to_path_buf());
+            }
         }
     }
+
+    // Print ignored files
+    /*if !ignored_files.is_empty() {
+        println!("\nIgnored files:");
+        for file in &ignored_files {
+            println!("├── {}", file.display());
+        }
+    }*/
 
     println!("\nFound {} files", files.len());
     println!("Sorting file list...");
 
-    // Sort files for consistent output                                                            files.sort();
+    files.sort();
 
     println!("Building file tree...");
     let tree = build_tree(&files);
 
     println!("Reading file contents...");
 
-    // Build the concatenated files content
     let mut concatenated = String::new();
     for file in &files {
         let full_path = root_path.join(file);
@@ -110,24 +147,25 @@ fn main() -> Result<()> {
             Ok(content) => {
                 println!("Processing: {}", file.display());
                 concatenated.push_str(&format!(
-                    "\n\n--- File: {} ---\n\n{}",                                                                  file.display(),
+                    "\n\n--- File: {} ---\n\n{}",
+                    file.display(),
                     content
-                ));                                                                                        }
+                ));
+            }
             Err(err) => eprintln!("Error reading {}: {}", file.display(), err),
         }
     }
 
     println!("\nBuilding final prompt...");
 
-    // Build the final prompt
     let prompt = format!(
         "I want you to help me fix some issues with my code. \n
-         I have attached the code and file structure.\n\n                                      File Tree:\n{}\n\
+         I have attached the code and file structure.\n\n
+         File Tree:\n{}\n
          Concatenated Files:{}",
         tree, concatenated
     );
 
-    // Handle output
     if let Some(output_file) = args.output_file {
         println!("Saving to file: {}", output_file.display());
         fs::write(&output_file, &prompt).context("Failed to write output file")?;
@@ -137,3 +175,4 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
