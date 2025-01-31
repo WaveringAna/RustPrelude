@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{command, Parser};
+use clipboard::{ClipboardContext, ClipboardProvider};
 use ignore::WalkBuilder;
+use log::{debug, error, info};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -41,33 +43,36 @@ fn build_tree(entries: &[PathBuf]) -> String {
 }
 
 fn main() -> Result<()> {
+    // Initialize the logger
+    env_logger::init();
+
     let args = Args::parse();
 
-    println!("Starting file scan...");
+    info!("Starting file scan...");
 
     // Determine the root path
     let root_path = args.path.unwrap_or_else(|| PathBuf::from("."));
     let root_path = fs::canonicalize(&root_path)?;
-    println!("Scanning directory: {}", root_path.display());
+    info!("Scanning directory: {}", root_path.display());
 
     // Build the walker with ignore files
     let mut walker = WalkBuilder::new(&root_path);
 
     // Add .gitignore patterns
     if Path::new(".gitignore").exists() {
-        println!("Found .gitignore - applying ignore patterns");
+        info!("Found .gitignore - applying ignore patterns");
         walker.add_ignore(Path::new(".gitignore"));
     }
 
     // Add .preludeignore patterns
     if Path::new(".preludeignore").exists() {
-        println!("Found .preludeignore - applying ignore patterns");
+        info!("Found .preludeignore - applying ignore patterns");
         walker.add_ignore(Path::new(".preludeignore"));
     }
 
     // Configure git integration
     if args.git_only {
-        println!("Git-only mode enabled - only including tracked files");
+        info!("Git-only mode enabled - only including tracked files");
         walker.git_ignore(true);
         walker.git_global(true);
         walker.git_exclude(true);
@@ -76,10 +81,10 @@ fn main() -> Result<()> {
     // Set case sensitivity
     walker.ignore_case_insensitive(!args.case_sensitive);
     if args.case_sensitive {
-        println!("Case-sensitive matching enabled");
+        info!("Case-sensitive matching enabled");
     }
 
-    println!("\nCollecting files...");
+    info!("Collecting files...");
 
     // Collect all valid files
     let mut files: Vec<PathBuf> = Vec::new();
@@ -96,7 +101,8 @@ fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     // Then get entries with ignoring enabled
-    let filtered_entries = walker.build()
+    let filtered_entries = walker
+        .build()
         .map(|r| r.map_err(anyhow::Error::from))
         .collect::<Result<Vec<_>>>()?;
 
@@ -104,7 +110,11 @@ fn main() -> Result<()> {
     'outer: for entry in all_entries {
         let path = entry.path().strip_prefix(&root_path).unwrap().to_path_buf();
         for filtered_entry in &filtered_entries {
-            let filtered_path = filtered_entry.path().strip_prefix(&root_path).unwrap().to_path_buf();
+            let filtered_path = filtered_entry
+                .path()
+                .strip_prefix(&root_path)
+                .unwrap()
+                .to_path_buf();
             if path == filtered_path {
                 continue 'outer;
             }
@@ -116,63 +126,70 @@ fn main() -> Result<()> {
     for entry in filtered_entries {
         if entry.file_type().map_or(false, |ft| ft.is_file()) {
             if let Ok(path) = entry.path().strip_prefix(&root_path) {
-                println!("Reading: {}", path.display());
+                debug!("Reading: {}", path.display());
                 files.push(path.to_path_buf());
             }
         }
     }
 
-    // Print ignored files
-    /*if !ignored_files.is_empty() {
-        println!("\nIgnored files:");
+    // Debug log ignored files
+    if !ignored_files.is_empty() {
+        debug!("Ignored files:");
         for file in &ignored_files {
-            println!("├── {}", file.display());
+            debug!("├── {}", file.display());
         }
-    }*/
-
-    println!("\nFound {} files", files.len());
-    println!("Sorting file list...");
+    }
 
     files.sort();
 
-    println!("Building file tree...");
+    info!("Building file tree...");
     let tree = build_tree(&files);
 
-    println!("Reading file contents...");
+    info!("Reading file contents...");
 
     let mut concatenated = String::new();
     for file in &files {
         let full_path = root_path.join(file);
         match fs::read_to_string(&full_path) {
             Ok(content) => {
-                println!("Processing: {}", file.display());
+                debug!("Processing: {}", file.display());
                 concatenated.push_str(&format!(
                     "\n\n--- File: {} ---\n\n{}",
                     file.display(),
                     content
                 ));
             }
-            Err(err) => eprintln!("Error reading {}: {}", file.display(), err),
+            Err(err) => error!("Error reading {}: {}", file.display(), err),
         }
     }
 
-    println!("\nBuilding final prompt...");
+    info!("Building final prompt...");
 
     let prompt = format!(
-        "I want you to help me fix some issues with my code. \n
-         I have attached the code and file structure.\n\n
-         File Tree:\n{}\n
-         Concatenated Files:{}",
+        "I want you to help me fix some issues with my code.\n
+I have attached the code and file structure.\n\n
+File Tree:\n{}\n
+Concatenated Files:{}",
         tree, concatenated
     );
 
-    if let Some(output_file) = args.output_file {
-        println!("Saving to file: {}", output_file.display());
+    if let Some(ref output_file) = args.output_file {
+        info!("Saving to file: {}", output_file.display());
         fs::write(&output_file, &prompt).context("Failed to write output file")?;
-        println!("Successfully saved prompt to {}", output_file.display());
+        info!("Successfully saved prompt to {}", output_file.display());
     }
-    println!("\nProcess completed successfully!");
+
+    // Only copy to clipboard if not saving to file
+    if args.output_file.is_none() {
+        info!("Copying prompt to clipboard...");
+        let mut ctx: ClipboardContext = ClipboardProvider::new().unwrap();
+        match ctx.set_contents(prompt.to_owned()) {
+            Ok(_) => info!("Prompt copied to clipboard successfully!"),
+            Err(err) => error!("Failed to copy prompt to clipboard: {}", err),
+        }
+    }
+
+    info!("Process completed successfully!");
 
     Ok(())
 }
-
